@@ -1,0 +1,52 @@
+name: Build Linux App
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-22.04
+    container:
+      image: ubuntu:20.04
+
+    steps:
+      - name: Install basic deps
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            curl git build-essential libgtk-3-dev libwebkit2gtk-4.0-dev \
+            libayatana-appindicator3-dev librsvg2-dev patchelf file
+
+      - name: Install Node.js
+        run: |
+          curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+          apt-get install -y nodejs
+          node -v
+          npm -v
+          ldd --version
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          npm install
+
+      - name: Build
+        run: |
+          npm run build
+
+      - name: Show output
+        run: |
+          find . -maxdepth 4 -type f \( -name "*.AppImage" -o -name "*.deb" -o -name "*.rpm" \) -print
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cc-switch-linux-glibc-2.31
+          path: |
+            **/*.AppImage
+            **/*.deb
+            **/*.rpm
