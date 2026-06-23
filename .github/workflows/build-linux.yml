@@ -1,56 +1,190 @@
-name: Build Linux App
+name: Build Linux glibc 2.31
 
 on:
   workflow_dispatch:
   push:
-    branches: [ main, master ]
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-linux-glibc231-${{ github.ref_name }}
+  cancel-in-progress: true
 
 jobs:
   build-linux:
-    runs-on: ubuntu-22.04
+    name: Build Linux ${{ matrix.arch }} glibc 2.31
+    runs-on: ${{ matrix.os }}
+
     container:
       image: ubuntu:20.04
 
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            arch: x86_64
+          - os: ubuntu-22.04-arm
+            arch: arm64
+
     steps:
-      - name: Install basic deps
-        run: |
-          apt-get update
-          DEBIAN_FRONTEND=noninteractive apt-get install -y \
-            curl git build-essential libgtk-3-dev libwebkit2gtk-4.0-dev \
-            libayatana-appindicator3-dev librsvg2-dev patchelf file
-
-      - name: Install Node.js
-        run: |
-          curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
-          apt-get install -y nodejs
-          node -v
-          npm -v
-          ldd --version
-      
-      - name: Install pnpm
-        run: |
-          npm install -g pnpm
-          pnpm -v
-
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install dependencies
+      - name: Install system dependencies
+        shell: bash
         run: |
-          pnpm install
+          set -euxo pipefail
 
-      - name: Build
-        run: pnpm tauri build
+          apt-get update
 
-      - name: Show output
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            ca-certificates \
+            curl \
+            wget \
+            git \
+            file \
+            build-essential \
+            pkg-config \
+            patchelf \
+            libssl-dev \
+            rpm \
+            xdg-utils \
+            fuse \
+            libfuse2 \
+            libgtk-3-dev \
+            librsvg2-dev \
+            libayatana-appindicator3-dev \
+            libwebkit2gtk-4.0-dev \
+            libsoup2.4-dev
+
+          echo "=== OS ==="
+          cat /etc/os-release
+
+          echo "=== ARCH ==="
+          uname -m
+
+          echo "=== GLIBC ==="
+          ldd --version
+
+      - name: Install Node.js 20
+        shell: bash
         run: |
-          find . -maxdepth 4 -type f \( -name "*.AppImage" -o -name "*.deb" -o -name "*.rpm" \) -print
+          set -euxo pipefail
 
-      - name: Upload artifact
+          curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+          apt-get install -y nodejs
+
+          node -v
+          npm -v
+
+      - name: Install pnpm
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          npm install -g pnpm@10.12.3
+          pnpm -v
+
+      - name: Install Rust
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          curl https://sh.rustup.rs -sSf | sh -s -- -y
+          . "$HOME/.cargo/env"
+
+          rustc --version
+          cargo --version
+
+      - name: Install frontend dependencies
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          pnpm install --frozen-lockfile
+
+      - name: Build Tauri Linux bundles
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          . "$HOME/.cargo/env"
+
+          pnpm tauri build --bundles appimage,deb,rpm
+
+      - name: Prepare Linux assets
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          mkdir -p release-assets
+
+          VERSION="${GITHUB_REF_NAME}"
+          if [ "$VERSION" = "main" ] || [ "$VERSION" = "master" ]; then
+            VERSION="manual"
+          fi
+
+          ARCH="${{ matrix.arch }}"
+
+          APPIMAGE=$(find src-tauri/target/release/bundle -name "*.AppImage" | head -1 || true)
+          if [ -n "$APPIMAGE" ]; then
+            NEW_APPIMAGE="CC-Switch-${VERSION}-Linux-${ARCH}.AppImage"
+            cp "$APPIMAGE" "release-assets/$NEW_APPIMAGE"
+            [ -f "$APPIMAGE.sig" ] && cp "$APPIMAGE.sig" "release-assets/$NEW_APPIMAGE.sig" || true
+          fi
+
+          DEB=$(find src-tauri/target/release/bundle -name "*.deb" | head -1 || true)
+          if [ -n "$DEB" ]; then
+            cp "$DEB" "release-assets/CC-Switch-${VERSION}-Linux-${ARCH}.deb"
+          fi
+
+          RPM=$(find src-tauri/target/release/bundle -name "*.rpm" | head -1 || true)
+          if [ -n "$RPM" ]; then
+            cp "$RPM" "release-assets/CC-Switch-${VERSION}-Linux-${ARCH}.rpm"
+          fi
+
+          ls -lah release-assets
+
+      - name: Upload workflow artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: cc-switch-linux-glibc-2.31
-          path: |
-            **/*.AppImage
-            **/*.deb
-            **/*.rpm
+          name: release-assets-Linux-${{ matrix.arch }}-glibc231
+          path: release-assets/*
+          if-no-files-found: error
+
+  publish-release:
+    name: Publish GitHub Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-22.04
+    needs: build-linux
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download built artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-assets-Linux-*-glibc231
+          path: release-assets
+          merge-multiple: true
+
+      - name: List release assets
+        shell: bash
+        run: |
+          set -euxo pipefail
+          ls -lah release-assets
+
+      - name: Upload release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: CC Switch ${{ github.ref_name }} glibc 2.31
+          prerelease: true
+          files: release-assets/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
