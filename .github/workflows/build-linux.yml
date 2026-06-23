@@ -26,17 +26,21 @@ jobs:
           node -v
           npm -v
           ldd --version
+      
+      - name: Install pnpm
+        run: |
+          npm install -g pnpm
+          pnpm -v
 
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Install dependencies
         run: |
-          npm install
+          pnpm install
 
       - name: Build
-        run: |
-          npm run build
+        run: pnpm tauri build
 
       - name: Show output
         run: |
